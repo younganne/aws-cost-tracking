@@ -2,6 +2,8 @@
 
 ## AWS cost tracking, alerting, and reporting
 
+(This is a sanitized version of a private icsi-it repo. Much of the credit for the GitHub Actions workflow and OIDC auth goes to GH user pmaguire)
+
 A Cloudformation template that creates an AWS budget and sends out both email and Slack alerts in the following scenarios:
 
 - Forecasted costs exceed 100% of budget.
