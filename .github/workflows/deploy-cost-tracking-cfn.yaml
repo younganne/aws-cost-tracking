@@ -1,0 +1,45 @@
+name: Deploy Cost Tracking Cloudformation
+on:
+  push:
+    branches:
+      - main
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  Deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - aws_account_id: <AWS Account ID. REQUIRED.> 
+            aws_account_name: "Professional Development Sandbox" # 
+            aws_account_email_1: IT_SANDBOX_ALERT_EMAIL_1 # IT Helpdesk Email
+            aws_account_email_2: IT_SANDBOX_ALERT_EMAIL_2 # Accounts Payable Email
+            slack_webhook_url_1: IT_SANDBOX_SLACK_WEBHOOK_URL_1 # IT Team Slack Channel
+            slack_webhook_url_2: IT_SANDBOX_SLACK_WEBHOOK_URL_2 # AWS Budget Alerts Slack Channel
+            budget_cost_limit: 100
+          - aws_account_id: <AWS Account ID. REQUIRED.> 
+            aws_account_name: "ICIR.org AWS account"
+            aws_account_email_1: IT_SANDBOX_ALERT_EMAIL_1 # IT Helpdesk Email
+            aws_account_email_2: IT_SANDBOX_ALERT_EMAIL_2 # Accounts Payable Email
+            slack_webhook_url_1: IT_SANDBOX_SLACK_WEBHOOK_URL_1 # IT Team Slack Channel
+            slack_webhook_url_2: IT_SANDBOX_SLACK_WEBHOOK_URL_2 # AWS Budget Alerts Slack Channel
+            budget_cost_limit: 30
+    
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ matrix.aws_account_id }}:role/IcsiItGithubOidcRoleForCostTracking
+          role-session-name: IcsiItGithubOidcSession
+          aws-region: us-west-2
+      - name: Deploy to AWS CloudFormation
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: IcsiItCostTracking
+          template: cost-tracking-budgets-alerts-cfn.yaml
+          no-fail-on-empty-changeset: "1"
+          parameter-overrides: BudgetLimit=${{ matrix.budget_cost_limit }},AwsAccountName=${{ matrix.aws_account_name }},UserEmail1=${{ secrets[matrix.aws_account_email_1] }},UserEmail2=${{ secrets[matrix.aws_account_email_2] }},SlackWebhookUrl1=${{ secrets[matrix.slack_webhook_url_1] }},SlackWebhookUrl2=${{ secrets[matrix.slack_webhook_url_2] }}
+          capabilities: CAPABILITY_NAMED_IAM

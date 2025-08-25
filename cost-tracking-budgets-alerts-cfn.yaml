@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Cloudformation stack that creates an AWS budget and sends out alerts when budgeted costs are exceeded.
+Parameters:
+  AwsAccountName:
+    Description: Account Name
+    Type: String
+  SlackWebhookUrl1:
+    Type: String
+    NoEcho: true
+  SlackWebhookUrl2:
+    Type: String
+    NoEcho: true
+  BudgetLimit:
+    Description: Budget limit amount
+    Type: Number
+  UserEmail1:
+    Description: Email budget alerts will be sent to
+    Type: String
+    NoEcho: true
+  UserEmail2:
+    Description: Email budget alerts will be sent to
+    Type: String
+    NoEcho: true
+Resources:
+  SlackWebhookUrl1Secret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: /IcsiItCostTracking/SlackAlerts/WebhookUrl1
+      Description: Icsi IT - Slack webhook url for sending cost tracking alerts.
+      SecretString: !Ref SlackWebhookUrl1
+  SlackWebhookUrl2Secret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: /IcsiItCostTracking/SlackAlerts/WebhookUrl2
+      Description: Icsi IT - Slack webhook url for sending cost tracking alerts.
+      SecretString: !Ref SlackWebhookUrl2
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: ICSI IT Budget Alerts
+      FifoTopic: false
+      Subscription:
+        - Endpoint: !GetAtt LambdaBudgetAlertsPublisherFunction.Arn
+          Protocol: lambda
+  SNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: budgets.amazonaws.com
+          Action: sns:Publish
+          Resource: "*"
+      Topics:
+        - !Ref SNSTopic
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: IcsiItCostTracking-LambdaRole
+      Description: An execution role for a Lambda function launched by CloudFormation
+      ManagedPolicyArns:
+        - !Ref LambdaPolicy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+  LambdaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: IcsiItCostTracking-LambdaPolicy
+      Description: Managed policy for a Lambda function launched by CloudFormation
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/IcsiItCostTrackingSlackAlerts:*'
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+            Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*'
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/IcsiItCostTracking/SlackAlerts/*'
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/IcsiItCostTrackingSlackAlerts
+      RetentionInDays: 30
+  LambdaBudgetAlertsPublisherFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Receives AWS Budget alerts and sends them to Slack channels
+      FunctionName: IcsiItCostTrackingSlackAlerts
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Runtime: python3.12
+      Role: !GetAtt 'LambdaRole.Arn'
+      Timeout: 30
+      Layers:
+        - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPythonV2:65
+      Environment:
+        Variables:
+          AwsAccountName: !Ref AwsAccountName
+      Code:
+        ZipFile: |
+            import json
+            import os
+            from pip._vendor import requests
+            from aws_lambda_powertools.utilities import parameters
+
+            aws_account_name = os.environ.get('AwsAccountName')
+            slack_webhook_url_1 = parameters.get_secret("/IcsiItCostTracking/SlackAlerts/WebhookUrl1")
+            slack_webhook_url_2 = parameters.get_secret("/IcsiItCostTracking/SlackAlerts/WebhookUrl2")
+
+            def lambda_handler(event, context):
+
+                if not slack_webhook_url_1 and not slack_webhook_url_2:
+                    raise Exception(f'At least one Slack webhook URL must be provided.')
+
+                if 'Records' not in event:
+                    raise Exception(f'Unexpected Event Detected: {event}')
+
+                for event_record in event['Records']:
+                    if 'Sns' not in event_record:
+                        raise Exception(f'Unexpected Event Record Detected: {event_record}')
+                    if event_record['Sns']['Type'] != 'Notification':
+                        raise Exception(f'Received unexpected SNS event type: {event_record["Sns"]}')
+                    message = f"{aws_account_name}\n{event_record['Sns']['Message']}"
+                    payload = {'text': message}
+                    for url in [slack_webhook_url_1, slack_webhook_url_2]:
+                        if url:
+                            resp = requests.post(url, data=json.dumps(payload), headers={'Content-Type': 'application/json'}, timeout=5)
+                            if resp.status_code != 200:
+                                raise Exception(f'Error when sending Budget Alert to Slack. Status Code: {resp.status_code} Error: {resp.text}')
+                    print(f'Alerts successfully sent to slack.')
+
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaBudgetAlertsPublisherFunction
+      Action: lambda:InvokeFunction
+      SourceArn: !Ref SNSTopic
+      Principal: sns.amazonaws.com
+  Budget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetLimit:
+          Amount: !Ref BudgetLimit
+          Unit: "USD"
+        BudgetName: AWS Costs Budget
+        BudgetType: COST
+        CostTypes:
+          IncludeCredit: false
+          IncludeDiscount: true
+          IncludeOtherSubscription: true
+          IncludeRecurring: true
+          IncludeRefund: false
+          IncludeSubscription: true
+          IncludeSupport: true
+          IncludeTax: true
+          IncludeUpfront: true
+          UseAmortized: false
+          UseBlended: false
+        TimeUnit: MONTHLY
+      NotificationsWithSubscribers:
+        ## Alert when actual cost exceeds 90%
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 90
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref UserEmail1
+            - SubscriptionType: EMAIL
+              Address: !Ref UserEmail2
+            - SubscriptionType: SNS
+              Address: !Ref SNSTopic
+        ## Alert when forecasted cost exceeds 100%
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref UserEmail1
+            - SubscriptionType: EMAIL
+              Address: !Ref UserEmail2
+            - SubscriptionType: SNS
+              Address: !Ref SNSTopic
